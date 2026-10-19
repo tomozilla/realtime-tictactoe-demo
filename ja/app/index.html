@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ライブ注文ボード（Realtimeデモ）</title>
+<style>
+  :root { --ink:#1f2933; --sub:#6b7785; --line:#e3e8ee; --bg:#f4f6f9; --brand:#2563eb; --good:#16a34a; --warn:#d97706; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; line-height:1.55; }
+  header { background:#fff; border-bottom:1px solid var(--line); padding:12px 24px; display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+  header h1 { margin:0; font-size:18px; }
+  .conn { font-size:12.5px; color:var(--sub); display:flex; align-items:center; gap:6px; } .dot { width:10px; height:10px; border-radius:50%; background:#cbd5e1; } .dot.on { background:var(--good); }
+  .people { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--sub); }
+  .av { width:30px; height:30px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px; border:2px solid #fff; box-shadow:0 0 0 1px var(--line); }
+  .av.me { box-shadow:0 0 0 2px var(--brand); }
+  main { max-width:1100px; margin:20px auto; padding:0 20px; display:grid; grid-template-columns:repeat(3,1fr) 280px; gap:16px; align-items:start; }
+  @media (max-width:980px){ main { grid-template-columns:1fr; } }
+  .col { background:#e9edf3; border-radius:14px; padding:12px; min-height:300px; }
+  .col h2 { margin:2px 4px 10px; font-size:13.5px; display:flex; justify-content:space-between; } .col h2 span { color:var(--sub); font-weight:400; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:10px; position:relative; cursor:pointer; }
+  .card.focus { outline:2px solid #f59e0b; }
+  .card .t { font-weight:700; } .card .m { font-size:12.5px; color:var(--sub); } .card .by { font-size:11.5px; color:var(--sub); margin-top:4px; }
+  .card .btns { display:flex; gap:6px; margin-top:8px; } button { font:inherit; border:0; border-radius:8px; padding:5px 10px; cursor:pointer; background:#eef2f7; color:var(--ink); font-size:12.5px; } button.go { background:var(--brand); color:#fff; font-weight:600; }
+  .watch { position:absolute; top:-9px; right:8px; display:flex; gap:4px; } .watch span { background:#f59e0b; color:#fff; font-size:11px; font-weight:700; padding:1px 8px; border-radius:999px; }
+  aside .box { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:14px; } aside h3 { margin:0 0 8px; font-size:13.5px; }
+  aside input { width:100%; font:inherit; padding:8px 10px; border:1px solid #cdd5df; border-radius:8px; margin-bottom:8px; }
+  #log { font-size:12.5px; color:#3e4c59; } #log div { padding:5px 0; border-top:1px solid var(--line); } #log div:first-child { border-top:0; } #log time { color:var(--sub); margin-right:6px; }
+  #err { display:none; background:#fee2e2; border:1px solid #fca5a5; color:#991b1b; padding:10px 14px; border-radius:10px; margin:14px 24px 0; font-size:13px; }
+  .hint { font-size:12px; color:var(--sub); }
+  .offline .col, .offline .people { opacity:.45; filter:grayscale(.6); }   /* 切れているときは、古い情報だと分かるようにする */
+</style>
+<script src="config.js"></script>
+</head>
+<body>
+<header>
+  <h1>ライブ注文ボード</h1>
+  <div class="conn"><span class="dot" id="dot"></span><span id="connText">接続中…</span></div>
+  <div class="people" id="people"></div>
+</header>
+<div id="err"></div>
+<main id="board">
+  <div class="col" data-s="受付"><h2>受付 <span></span></h2><div class="list"></div></div>
+  <div class="col" data-s="調理中"><h2>調理中 <span></span></h2><div class="list"></div></div>
+  <div class="col" data-s="完了"><h2>完了 <span></span></h2><div class="list"></div></div>
+  <aside>
+    <div class="box"><h3>注文を追加</h3>
+      <input id="customer" placeholder="席・お客さま（例：テーブル2）"><input id="item" placeholder="メニュー（例：オムライス）">
+      <button class="go" id="add">追加</button></div>
+    <div class="box"><h3>いま起きたこと</h3><div id="log"><span class="hint">変更がここに流れます</span></div></div>
+    <div class="hint">あなた：<b id="me"></b>（URLに <code>?name=Alice</code> のように付けて、タブごとに名前を変えられます）</div>
+  </aside>
+</main>
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+const cfg = window.APP_CONFIG
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const showErr = (m) => { $('err').style.display = m ? 'block' : 'none'; $('err').textContent = m || '' }
+if (!cfg || !cfg.SUPABASE_URL || !cfg.SUPABASE_PUBLISHABLE_KEY) {
+  showErr('config.js がありません。config.example.js をコピーして、値を入れてください。'); throw new Error('config.js is missing')
+}
+const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_PUBLISHABLE_KEY)
+
+const params = new URLSearchParams(location.search)
+const me = params.get('name') || sessionStorage.getItem('name') || ('ゲスト' + Math.floor(Math.random() * 90 + 10))
+sessionStorage.setItem('name', me); $('me').textContent = me
+
+const STATUSES = ['受付', '調理中', '完了']
+const orders = new Map()          // id -> row（データベースが持っている「いまの状態」）
+let focusId = null                // 自分が見ている（触っている）カード
+let people = []                   // Presence：いま入っている人（自分を含む）
+const COLORS = ['#2563eb', '#db2777', '#16a34a', '#d97706', '#7c3aed', '#0891b2']
+const colorOf = (n) => COLORS[[...n].reduce((a, c) => a + c.charCodeAt(0), 0) % COLORS.length]
+const ago = (iso) => { const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000)); return s < 60 ? `${s}秒前` : s < 3600 ? `${Math.floor(s / 60)}分前` : `${Math.floor(s / 3600)}時間前` }
+
+function render() {
+  document.querySelectorAll('.col').forEach((col) => {
+    const s = col.dataset.s
+    const rows = [...orders.values()].filter((o) => o.status === s).sort((a, b) => a.id - b.id)
+    col.querySelector('h2 span').textContent = `${rows.length}件`
+    col.querySelector('.list').innerHTML = rows.map((o) => {
+      const watchers = people.filter((p) => p.focus === o.id && p.name !== me)
+      const i = STATUSES.indexOf(o.status)
+      return `<div class="card ${focusId === o.id ? 'focus' : ''}" data-id="${o.id}">
+        ${watchers.length ? `<div class="watch">${watchers.map((w) => `<span style="background:${colorOf(w.name)}">${esc(w.name)}が見ています</span>`).join('')}</div>` : ''}
+        <div class="t">#${o.id} ${esc(o.item)}</div><div class="m">${esc(o.customer)}</div>
+        <div class="by">${o.updated_by ? `${esc(o.updated_by)}さんが更新 · ${ago(o.updated_at)}` : ''}</div>
+        <div class="btns">${i > 0 ? `<button data-act="back">← ${STATUSES[i - 1]}へ</button>` : ''}${i < 2 ? `<button class="go" data-act="next">${STATUSES[i + 1]}へ →</button>` : ''}</div></div>`
+    }).join('')
+  })
+  $('people').innerHTML = `<span>いま見ている人</span>` + people.map((p) => `<span class="av ${p.name === me ? 'me' : ''}" style="background:${colorOf(p.name)}" title="${esc(p.name)}">${esc([...p.name][0])}</span>`).join('') + `<span>${people.length}人</span>`
+}
+
+function log(text) {
+  const el = $('log'); if (el.querySelector('.hint')) el.innerHTML = ''
+  const d = document.createElement('div'); d.innerHTML = `<time>${new Date().toLocaleTimeString('ja-JP', { hour12: false })}</time>${esc(text)}`
+  el.prepend(d); while (el.children.length > 6) el.lastChild.remove()
+}
+
+async function loadAll() {           // 入室したとき・つなぎ直したときに、データベースから「いまの状態」を全部読む
+  const { data, error } = await supabase.from('orders').select('*').order('id')
+  if (error) { showErr('注文を読めませんでした：' + error.message); return }
+  showErr(''); orders.clear(); data.forEach((o) => orders.set(o.id, o)); render()
+}
+
+// ---------- Realtimeにつなぐ（切れたら、つなぎ直して、データベースから状態を読み直す） ----------
+let channel = null, retryTimer = null, connected = false, everConnected = false
+const myKey = me + '-' + Math.random().toString(36).slice(2, 6)
+
+function setConn(ok, status) {
+  connected = ok; if (ok) everConnected = true
+  const stale = !ok && (everConnected || status !== 'CONNECTING')   // 一度つながったあとで切れたら、つなぎ直すまで「古い情報」扱い
+  $('dot').classList.toggle('on', ok)
+  $('connText').textContent = ok ? 'つながっています' : stale ? '切れています（つなぎ直しています）' : '接続中…'
+  $('board').classList.toggle('offline', stale)
+  if (stale) showErr('接続が切れています。いまの表示は、古い情報かもしれません。つながり直したら、自動で最新の状態に読み直します。')
+  else if (ok) showErr('')
+}
+function scheduleReconnect(delay = 3000) {
+  if (retryTimer) return
+  retryTimer = setTimeout(async () => { retryTimer = null; if (channel) await supabase.removeChannel(channel); connect() }, delay)
+}
+function connect() {
+  setConn(false, 'CONNECTING')
+  const mine = channel = supabase.channel('orders-board', { config: { presence: { key: myKey } } })
+  mine
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (p) => {
+      const o = p.new
+      if (p.eventType === 'DELETE') { orders.delete(p.old.id); render(); return }
+      orders.set(o.id, o); render()
+      log(p.eventType === 'INSERT' ? `${o.updated_by || '誰か'}さんが「${o.item}」（${o.customer}）を追加しました` : `${o.updated_by || '誰か'}さんが「${o.item}」を「${o.status}」に移しました`)
+    })
+    .on('presence', { event: 'sync' }, () => { people = Object.values(mine.presenceState()).flat().map((m) => ({ name: m.name, focus: m.focus ?? null })); render() })
+    .subscribe(async (status) => {
+      if (mine !== channel) return                 // 古いチャンネルの通知は無視する
+      if (status === 'SUBSCRIBED') { setConn(true, status); await mine.track({ name: me, focus: focusId }); await loadAll() }
+      else if (['CLOSED', 'CHANNEL_ERROR', 'TIMED_OUT'].includes(status)) { setConn(false, status); scheduleReconnect() }
+    })
+}
+connect()
+// 裏のタブから戻ってきたときに、切れていたらすぐつなぎ直す
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !connected) { clearTimeout(retryTimer); retryTimer = null; scheduleReconnect(200) } })
+// 切断のテスト用：?debug=1 を付けると、window.__rt.disconnect() で、わざと切れる
+if (params.get('debug') === '1') window.__rt = supabase.realtime
+
+const setFocus = async (id) => { if (focusId === id) return; focusId = id; render(); if (connected) await channel.track({ name: me, focus: id }) }
+
+document.querySelector('main').addEventListener('click', async (e) => {
+  const card = e.target.closest('.card'); if (!card) { setFocus(null); return }
+  const id = Number(card.dataset.id); setFocus(id)
+  const act = e.target.dataset.act; if (!act) return
+  const o = orders.get(id), i = STATUSES.indexOf(o.status), next = STATUSES[i + (act === 'next' ? 1 : -1)]
+  const { error } = await supabase.from('orders').update({ status: next, updated_by: me, updated_at: new Date().toISOString() }).eq('id', id)
+  if (error) showErr('更新できませんでした：' + error.message); else showErr('')
+  setTimeout(() => setFocus(null), 1500)
+})
+$('add').onclick = async () => {
+  const customer = $('customer').value.trim(), item = $('item').value.trim(); if (!customer || !item) return
+  const { error } = await supabase.from('orders').insert({ customer, item, updated_by: me })
+  if (error) showErr('追加できませんでした：' + error.message); else { showErr(''); $('customer').value = ''; $('item').value = '' }
+}
+setInterval(render, 15000)   // 「◯秒前」の表示を更新する
+</script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tic-tac-toe (Realtime demo)</title>
+<style>
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; background:#f6f7f9; margin:0; padding:24px; color:#222; }
+  #app { width:360px; background:#fff; border-radius:16px; padding:20px; box-shadow:0 2px 10px rgba(0,0,0,.08); }
+  h1 { font-size:20px; margin:0 0 8px; }
+  #me { font-size:14px; color:#555; margin-bottom:6px; }
+  #who { font-size:14px; margin-bottom:14px; padding:8px 10px; background:#eef6ff; border-radius:8px; }
+  #board { display:grid; grid-template-columns:repeat(3,100px); gap:6px; }
+  .cell { width:100px; height:100px; font-size:44px; font-weight:700; border:2px solid #ccd; border-radius:10px; background:#fafbff; cursor:pointer; }
+  .cell:disabled { cursor:default; }
+  .X { color:#2563eb; } .O { color:#dc2626; }
+  #msg { margin-top:12px; font-size:15px; min-height:22px; font-weight:600; }
+  button.reset { margin-top:10px; padding:6px 12px; border-radius:8px; border:1px solid #ccd; background:#fff; cursor:pointer; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Tic-tac-toe</h1>
+  <div id="me"></div>
+  <div id="who">Connecting...</div>
+  <div id="board"></div>
+  <div id="msg"></div>
+  <button class="reset" id="reset">Start over</button>
+</div>
+
+<script src="config.js"></script>
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+// ?name=Alice&mark=X  /  ?name=Bob&mark=O  /  ?name=Carol (spectator)  /  &resync=1 (late joiner asks for the current board)
+const params = new URLSearchParams(location.search)
+const name = params.get('name') || 'Guest'
+const mark = params.get('mark') || ''
+const resync = params.get('resync') === '1'
+
+// Read from config.js (created by copying config.example.js; it is not committed to git)
+const cfg = window.APP_CONFIG
+if (!cfg || !cfg.SUPABASE_URL || !cfg.SUPABASE_PUBLISHABLE_KEY) {
+  document.getElementById('who').textContent = 'config.js is missing. Copy config.example.js to config.js and fill in the values.'
+  throw new Error('config.js is missing')
+}
+const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_PUBLISHABLE_KEY)
+const room = supabase.channel('game-room-1', {
+  config: { broadcast: { self: false }, presence: { key: name } },
+})
+
+let board = Array(9).fill('')
+let turn = 'X'
+
+const LINES = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]]
+const winner = () => { for (const [a,b,c] of LINES) if (board[a] && board[a]===board[b] && board[a]===board[c]) return board[a]; return board.every(Boolean) ? 'draw' : '' }
+
+function render() {
+  document.getElementById('me').textContent = mark ? `You: ${name} (${mark})` : `You: ${name} (spectator)`
+  const el = document.getElementById('board'); el.innerHTML = ''
+  board.forEach((v, i) => {
+    const b = document.createElement('button')
+    b.className = 'cell ' + v; b.textContent = v
+    b.disabled = !mark || !!v || !!winner() || turn !== mark
+    b.onclick = () => play(i, mark, true)
+    el.appendChild(b)
+  })
+  const w = winner()
+  document.getElementById('msg').textContent = w === 'draw' ? 'Draw' : w ? `${w} wins!` : `${turn}'s turn`
+}
+
+function play(i, m, send) {
+  if (board[i] || winner()) return
+  board[i] = m; turn = m === 'X' ? 'O' : 'X'; render()
+  if (send) room.send({ type: 'broadcast', event: 'move', payload: { cell: i, mark: m } })   // send the move to everyone in the same room
+}
+
+// Receive moves (Broadcast)
+room.on('broadcast', { event: 'move' }, ({ payload }) => play(payload.cell, payload.mark, false))
+room.on('broadcast', { event: 'reset' }, () => { board = Array(9).fill(''); turn = 'X'; render() })
+
+// A late joiner asks "what is the board now?" and a player answers
+room.on('broadcast', { event: 'state-request' }, () => {
+  if (mark) room.send({ type: 'broadcast', event: 'state', payload: { board, turn } })
+})
+room.on('broadcast', { event: 'state' }, ({ payload }) => { board = payload.board; turn = payload.turn; render() })
+
+// Who is here right now (Presence)
+room.on('presence', { event: 'sync' }, () => {
+  const people = Object.values(room.presenceState()).flat()
+  const players = people.filter(p => p.mark).map(p => `${p.name}(${p.mark})`)
+  const watchers = people.filter(p => !p.mark).map(p => p.name)
+  document.getElementById('who').textContent =
+    `Online: ${people.length} - ` + [...players, ...watchers.map(n => `${n} (spectator)`)].join(', ')
+})
+
+document.getElementById('reset').onclick = () => {
+  board = Array(9).fill(''); turn = 'X'; render()
+  room.send({ type: 'broadcast', event: 'reset', payload: {} })
+}
+
+room.subscribe(async (status) => {
+  if (status !== 'SUBSCRIBED') return
+  await room.track({ name, mark, online_at: new Date().toISOString() })
+  if (resync) room.send({ type: 'broadcast', event: 'state-request', payload: {} })
+})
+
+render()
+</script>
+</body>
+</html>
